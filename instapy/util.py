@@ -1,45 +1,51 @@
 """ Common utilities """
+# import built-in & third-party modules
 import time
 import datetime
-from math import ceil
-from math import radians
-from math import degrees as rad2deg
-from math import cos
 import random
 import re
 import regex
 import signal
 import os
 import sys
+import csv
+import sqlite3
+import json
+import emoji
+
+from math import ceil
+from math import radians
+from math import cos
+from math import degrees as rad2deg
 from sys import exit as clean_exit
 from platform import system
 from platform import python_version
 from subprocess import call
-import csv
-import sqlite3
-import json
+from random import randint
 from contextlib import contextmanager
 from tempfile import gettempdir
-import emoji
-from emoji.unicode_codes import UNICODE_EMOJI
 from argparse import ArgumentParser
 
+from emoji.unicode_codes import UNICODE_EMOJI
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.common.by import By
 
+# import InstaPy modules
+from .xpath import read_xpath
+from .event import Event
+from .settings import Settings
 from .time_util import sleep
 from .time_util import sleep_actual
 from .database_engine import get_database
 from .quota_supervisor import quota_supervisor
-from .settings import Settings
 
+# import exceptions
 from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.common.exceptions import WebDriverException
 from selenium.common.exceptions import TimeoutException
 
-from .xpath import read_xpath
-from .event import Event
 
 default_profile_pic_instagram = [
     "https://instagram.flas1-2.fna.fbcdn.net/vp"
@@ -63,6 +69,15 @@ next_screenshot = 1
 
 
 def is_private_profile(browser, logger, following=True):
+    """
+    Verify id account is Private
+
+    :param browser: The selenium webdriver instance
+    :param logger: the logger instance
+    :param following: Not accessed
+    :return: None if profile cannot be verified
+    """
+
     is_private = None
     try:
         is_private = browser.execute_script(
@@ -83,16 +98,31 @@ def is_private_profile(browser, logger, following=True):
         except WebDriverException:
             return None
 
-    # double check with xpath that should work only when we not follwoing a
-    # user
-    if is_private and not following:
-        logger.info("Is private account you're not following.")
-        body_elem = browser.find_element_by_tag_name("body")
-        is_private = body_elem.find_element_by_xpath(
-            read_xpath(is_private_profile.__name__, "is_private")
-        )
-
     return is_private
+
+
+# Evaluate a mandatory words list against a text
+def evaluate_mandatory_words(text, mandatory_words_list, level=0):
+    if level % 2 == 0:
+        # this is an "or" level so at least one of the words of compound sub-conditions should match
+        for word in mandatory_words_list:
+            if isinstance(word, list):
+                res = evaluate_mandatory_words(text, word, level + 1)
+                if res:
+                    return True
+            elif word.lower() in text:
+                return True
+        return False
+    else:
+        # this is an "and" level so all of the words and compound sub-conditions must match
+        for word in mandatory_words_list:
+            if isinstance(word, list):
+                res = evaluate_mandatory_words(text, word, level + 1)
+                if not res:
+                    return False
+            elif word.lower() not in text:
+                return False
+        return True
 
 
 def validate_username(
@@ -119,6 +149,7 @@ def validate_username(
     skip_business_categories,
     dont_skip_business_categories,
     skip_bio_keyword,
+    mandatory_bio_keywords,
     logger,
     logfolder,
 ):
@@ -156,7 +187,7 @@ def validate_username(
                     "owner's username"
                 )
                 inap_msg = (
-                    "---> Sorry, this page isn't available!\t~either "
+                    "--> Sorry, this page isn't available!\t~either "
                     "link is broken or page is removed\n"
                 )
                 return False, inap_msg
@@ -166,13 +197,12 @@ def validate_username(
         # `username_or_link`, then it is a `username`
 
     if username == own_username:
-        inap_msg = "---> Username '{}' is yours!\t~skipping user\n".format(own_username)
+        inap_msg = "--> Username '{}' is yours!\t~skipping user\n".format(own_username)
         return False, inap_msg
 
     if username in ignore_users:
-        inap_msg = (
-            "---> '{}' is in the `ignore_users` list\t~skipping "
-            "user\n".format(username)
+        inap_msg = "--> '{}' is in the `ignore_users` list\t~skipping " "user\n".format(
+            username
         )
         return False, inap_msg
 
@@ -187,7 +217,7 @@ def validate_username(
                         logger.info("Username in BlackList: {} ".format(username))
                         return (
                             False,
-                            "---> {} is in blacklist  ~skipping "
+                            "--> {} is in blacklist  ~skipping "
                             "user\n".format(username),
                         )
 
@@ -292,7 +322,7 @@ def validate_username(
                                 username,
                                 "potential user"
                                 if not reverse_relationship
-                                else "massive " "follower",
+                                else "massive follower",
                                 truncate_float(relationship_ratio, 2),
                             )
                         )
@@ -308,24 +338,27 @@ def validate_username(
             number_of_posts = getUserData(
                 "graphql.user.edge_owner_to_timeline_media.count", browser
             )
-        except WebDriverException:
-            logger.error("~cannot get number of posts for username")
-            inap_msg = "---> Sorry, couldn't check for number of posts of " "username\n"
+
+            if max_posts:
+                if number_of_posts > max_posts:
+                    inap_msg = (
+                        "Number of posts ({}) of '{}' exceeds the maximum limit "
+                        "given {}\n".format(number_of_posts, username, max_posts)
+                    )
+                    return False, inap_msg
+            if min_posts:
+                if number_of_posts < min_posts:
+                    inap_msg = (
+                        "Number of posts ({}) of '{}' is less than the minimum "
+                        "limit given {}\n".format(number_of_posts, username, min_posts)
+                    )
+                    return False, inap_msg
+        except (WebDriverException, TypeError):  # Catch if number_of_posts is NoneType
+            logger.error("~cannot get number of posts for username".format(username))
+            inap_msg = "--> Sorry, couldn't check for number of posts of username: '{}'\n".format(
+                username
+            )
             return False, inap_msg
-        if max_posts:
-            if number_of_posts > max_posts:
-                inap_msg = (
-                    "Number of posts ({}) of '{}' exceeds the maximum limit "
-                    "given {}\n".format(number_of_posts, username, max_posts)
-                )
-                return False, inap_msg
-        if min_posts:
-            if number_of_posts < min_posts:
-                inap_msg = (
-                    "Number of posts ({}) of '{}' is less than the minimum "
-                    "limit given {}\n".format(number_of_posts, username, min_posts)
-                )
-                return False, inap_msg
 
     # Skip users
 
@@ -347,7 +380,7 @@ def validate_username(
             profile_pic = getUserData("graphql.user.profile_pic_url", browser)
         except WebDriverException:
             logger.error("~cannot get the post profile pic url")
-            return False, "---> Sorry, couldn't get if user profile pic url\n"
+            return False, "--> Sorry, couldn't get if user profile pic url\n"
         if (
             profile_pic in default_profile_pic_instagram
             or str(profile_pic).find("11906329_960233084022564_1448528159_a.jpg") > 0
@@ -365,13 +398,13 @@ def validate_username(
             logger.error("~cannot get if user has business account active")
             return (
                 False,
-                "---> Sorry, couldn't get if user has business " "account active\n",
+                "--> Sorry, couldn't get if user has business account active\n",
             )
 
         if skip_non_business and not is_business_account:
             return (
                 False,
-                "---> Skiping non business because skip_non_business set to True",
+                "--> Skiping non business because skip_non_business set to True",
             )
 
         if is_business_account:
@@ -379,7 +412,7 @@ def validate_username(
                 category = getUserData("graphql.user.business_category_name", browser)
             except WebDriverException:
                 logger.error("~cannot get category name for user")
-                return False, "---> Sorry, couldn't get category name for " "user\n"
+                return False, "--> Sorry, couldn't get category name for user\n"
 
             if len(skip_business_categories) == 0:
                 # skip if not in dont_include
@@ -408,21 +441,30 @@ def validate_username(
                         ),
                     )
 
-    if len(skip_bio_keyword) != 0:
+    if len(skip_bio_keyword) > 0 or len(mandatory_bio_keywords) > 0:
+        # Navigate to the target user profile to read the Bio
+        user_link = "https://www.instagram.com/{}/".format(username)
+        web_address_navigator(browser, user_link)
+
         # if contain stop words then skip
         try:
-            profile_bio = getUserData("graphql.user.biography", browser)
+            profile_bio = getUserData("graphql.user.biography", browser).lower()
         except WebDriverException:
-            logger.error("~cannot get user bio")
-            return False, "---> Sorry, couldn't get get user bio " "account active\n"
+            logger.error("~cannot read '{}' bio".format(username))
+            return False, "--> Sorry, couldn't get get user bio account active\n"
         for bio_keyword in skip_bio_keyword:
-            if bio_keyword.lower() in profile_bio.lower():
+            if bio_keyword.lower() in profile_bio:
                 return (
                     False,
                     "{} has a bio keyword of {}, by default skip\n".format(
                         username, bio_keyword
                     ),
                 )
+        # the mandatory keywords applies to the username as well as the bio text
+        if mandatory_bio_keywords and not evaluate_mandatory_words(
+            username + " " + profile_bio, mandatory_bio_keywords
+        ):
+            return False, "Mandatory bio keywords not found"
 
     # if everything is ok
     return True, "Valid user"
@@ -441,7 +483,7 @@ def getUserData(
         update_activity(browser, state=None)
 
         data = browser.execute_script(
-            "return window._sharedData." "entry_data.ProfilePage[0]." + query
+            "return window._sharedData.entry_data.ProfilePage[0]." + query
         )
         return data
 
@@ -450,10 +492,10 @@ def update_activity(
     browser=None, action="server_calls", state=None, logfolder=None, logger=None
 ):
     """
-        1. Record every Instagram server call (page load, content load, likes,
-        comments, follows, unfollow)
-        2. Take rotative screenshots
-        3. update connection state and record to .json file
+    1. Record every Instagram server call (page load, content load, likes,
+    comments, follows, unfollow)
+    2. Take rotative screenshots
+    3. update connection state and record to .json file
     """
     # check action availability
     quota_supervisor("server_calls")
@@ -482,7 +524,7 @@ def update_activity(
             with open(path, "w") as json_file:
                 json.dump(data, json_file, indent=4)
         except Exception:
-            logger.warn("Unable to update JSON state file")
+            logger.warning("Unable to update JSON state file")
 
     # in case is just a state update and there is no server call
     if action is None:
@@ -572,7 +614,9 @@ def add_user_to_blacklist(username, campaign, action, logger, logfolder):
                 }
             )
     except Exception as err:
-        logger.error("blacklist dictWrite error {}".format(err))
+        logger.error(
+            "blacklist dictWrite error \n\t{}".format(str(err).encode("utf-8"))
+        )
 
     logger.info(
         "--> {} added to blacklist for {} campaign (action: {})".format(
@@ -604,9 +648,7 @@ def get_active_users(browser, username, posts, boundary, logger):
             if topCount_elements:  # prevent an empty string scenario
                 total_posts = format_number(topCount_elements[0].text)
             else:
-                logger.info(
-                    "Failed to get posts count on your profile!  ~empty " "string"
-                )
+                logger.info("Failed to get posts count on your profile!  ~empty string")
                 total_posts = None
         except NoSuchElementException:
             logger.info("Failed to get posts count on your profile!")
@@ -634,13 +676,15 @@ def get_active_users(browser, username, posts, boundary, logger):
     )
     # posts argument is the number of posts to collect usernames
     logger.info(
-        "Getting active users who liked the latest {} posts:\n  {}".format(
+        "Getting active users who liked the latest {} posts:\n {}".format(
             posts, message
         )
     )
 
     count = 1
     checked_posts = 0
+    user_list = []
+
     while count <= posts:
         # load next post
         try:
@@ -667,7 +711,7 @@ def get_active_users(browser, username, posts, boundary, logger):
                     likers_count += 1
                 else:
                     logger.info(
-                        "Failed to get likers count on your post {}  "
+                        "Failed to get likers count on your post {} "
                         "~empty string".format(count)
                     )
                     likers_count = None
@@ -691,7 +735,7 @@ def get_active_users(browser, username, posts, boundary, logger):
 
             except (IndexError, NoSuchElementException):
                 # Video have no likes button / no posts in page
-                logger.info("video found, try next post until we run out of posts")
+                logger.info("Video found, try next post until we run out of posts")
 
                 # edge case of account having only videos,  or last post is a video.
                 if checked_posts >= total_posts:
@@ -710,7 +754,6 @@ def get_active_users(browser, username, posts, boundary, logger):
             scroll_it = True
             try_again = 0
             start_time = time.time()
-            user_list = []
 
             if likers_count:
                 amount = (
@@ -759,11 +802,12 @@ def get_active_users(browser, username, posts, boundary, logger):
                     sleep_actual(1.2)  # old value 5.6
                     sc_rolled += 1
 
-                user_list = get_users_from_dialog(user_list, dialog)
+                user_list = get_users_from_dialog(user_list, dialog, logger)
 
                 # write & update records at Progress Tracker
                 if amount:
                     progress_tracker(len(user_list), amount, start_time, None)
+                    print("\n")
 
                 if boundary is not None:
                     if len(user_list) >= boundary:
@@ -782,8 +826,8 @@ def get_active_users(browser, username, posts, boundary, logger):
                         if try_again <= 1:  # can increase the amount of tries
                             logger.info(
                                 "Failed to get the desired amount of "
-                                "usernames but trying again.."
-                                "\t|> post:{}  |> attempt: {}\n".format(
+                                "usernames but trying again..."
+                                "\t|> post: {} |> attempt: {}\n".format(
                                     posts, try_again + 1
                                 )
                             )
@@ -793,10 +837,10 @@ def get_active_users(browser, username, posts, boundary, logger):
                             nap_it = 4 if try_again == 0 else 7
                             sleep_actual(nap_it)
 
-            user_list = get_users_from_dialog(user_list, dialog)
+            user_list = get_users_from_dialog(user_list, dialog, logger)
 
             logger.info(
-                "Post {}  |  Likers: found {}, catched {}\n\n".format(
+                "Post {} | Likers: found {}, catched {}\n\n".format(
                     count, likers_count, len(user_list)
                 )
             )
@@ -880,8 +924,9 @@ def delete_line_from_file(filepath, userToDelete, logger):
                 os.remove(file_path_old)
 
             except OSError as e:
-                logger.error("Can't remove file_path_old {}".format(str(e)))
-                sleep(5)
+                logger.error(
+                    "Can't remove file_path_old \n\t{}".format(str(e).encode("utf-8"))
+                )
 
         # rename original file to _old
         os.rename(filepath, file_path_old)
@@ -893,7 +938,9 @@ def delete_line_from_file(filepath, userToDelete, logger):
 
             except OSError as e:
                 logger.error(
-                    "Can't rename file_path_Temp to filepath {}".format(str(e))
+                    "Can't rename file_path_Temp to filepath \n\t{}".format(
+                        str(e).encode("utf-8")
+                    )
                 )
                 sleep(5)
 
@@ -901,7 +948,9 @@ def delete_line_from_file(filepath, userToDelete, logger):
         os.remove(file_path_old)
 
     except BaseException as e:
-        logger.error("delete_line_from_file error {}".format(str(e).encode("utf-8")))
+        logger.error(
+            "delete_line_from_file error \n\t{}".format(str(e).encode("utf-8"))
+        )
 
 
 def scroll_bottom(browser, element, range_int):
@@ -915,6 +964,25 @@ def scroll_bottom(browser, element, range_int):
         # update server calls
         update_activity(browser, state=None)
         sleep(1)
+
+    return
+
+
+def scroll_down(browser, y: int = 50):
+    """
+    Scroll down the page by 50 pixels
+
+    This is intended mainly for accept_follow_requests(), since user could
+    have several request to be accepted. By default only 10 users are shown,
+    but InstaPy user could requested to accept more than 10.
+
+    :param y: number of pixels to be moved
+    """
+
+    browser.execute_script("window.scrollBy(0, {})".format(y))
+    # update server calls
+    update_activity(browser, state=None)
+    sleep(randint(1, 5))
 
     return
 
@@ -939,7 +1007,7 @@ def click_element(browser, element, tryNum=0):
       exist, ...). on each attempt try and move the screen around in
       various ways. if all else fails, programmically click the button
       using `execute_script` in the browser.
-      """
+    """
 
     try:
         # use Selenium's built in click function
@@ -954,11 +1022,16 @@ def click_element(browser, element, tryNum=0):
 
         if tryNum == 0:
             # try scrolling the element into view
-            browser.execute_script(
-                "document.getElementsByClassName('"
-                + element.get_attribute("class")
-                + "')[0].scrollIntoView({ inline: 'center' });"
-            )
+            try:
+                # This tends to fail because the script fails to get the element class
+                if element.get_attribute("class") != "":
+                    browser.execute_script(
+                        "document.getElementsByClassName('"
+                        + element.get_attribute("class")
+                        + "')[0].scrollIntoView({ inline: 'center' });"
+                    )
+            except Exception:
+                pass
 
         elif tryNum == 1:
             # well, that didn't work, try scrolling to the top and then
@@ -973,13 +1046,18 @@ def click_element(browser, element, tryNum=0):
         else:
             # try `execute_script` as a last resort
             # print("attempting last ditch effort for click, `execute_script`")
-            browser.execute_script(
-                "document.getElementsByClassName('"
-                + element.get_attribute("class")
-                + "')[0].click()"
-            )
-            # update server calls after last click attempt by JS
-            update_activity(browser, state=None)
+            try:
+                if element.get_attribute("class") != "":
+                    browser.execute_script(
+                        "document.getElementsByClassName('"
+                        + element.get_attribute("class")
+                        + "')[0].click()"
+                    )
+                    # update server calls after last click attempt by JS
+                    update_activity(browser, state=None)
+            except Exception:
+                print("Failed to click an element, giving up now")
+
             # end condition for the recursive function
             return
 
@@ -1209,10 +1287,12 @@ def interruption_handler(
     notify=None,
     logger=None,
 ):
-    """ Handles external interrupt, usually initiated by the user like
-    KeyboardInterrupt with CTRL+C """
+    """Handles external interrupt, usually initiated by the user like
+    KeyboardInterrupt with CTRL+C"""
     if notify is not None and logger is not None:
         logger.warning(notify)
+
+    original_handler = None
 
     if not threaded:
         original_handler = signal.signal(SIG_type, handler)
@@ -1234,6 +1314,8 @@ def highlight_print(
     # find the number of chars needed off the length of the logger message
     output_len = 28 + len(username) + 3 + len(message) if logger else len(message)
     show_logs = Settings.show_logs
+    upper_char = None
+    lower_char = None
 
     if priority in ["initialization", "end"]:
         # OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
@@ -1325,6 +1407,8 @@ def remove_duplicates(container, keep_order, logger):
 
 def dump_record_activity(profile_name, logger, logfolder):
     """ Dump the record activity data to a local human-readable JSON """
+
+    conn = None
 
     try:
         # get a DB and start a connection
@@ -1429,8 +1513,8 @@ def ping_server(host, logger):
 
 
 def emergency_exit(browser, username, logger):
-    """ Raise emergency if the is no connection to server OR if user is not
-    logged in """
+    """Raise emergency if the is no connection to server OR if user is not
+    logged in"""
     server_address = "instagram.com"
     connection_state = ping_server(server_address, logger)
     if connection_state is False:
@@ -1446,7 +1530,7 @@ def emergency_exit(browser, username, logger):
 
 
 def load_user_id(username, person, logger, logfolder):
-    """ Load the user ID at reqeust from local records """
+    """ Load the user ID at request from local records """
     pool_name = "{0}{1}_followedPool.csv".format(logfolder, username)
     user_id = "undefined"
 
@@ -1469,7 +1553,7 @@ def load_user_id(username, person, logger, logfolder):
 
     except BaseException as exc:
         logger.exception(
-            "Failed to load the user ID of '{}'!\n{}".format(
+            "Failed to load the user ID of '{}'!\n\t{}".format(
                 person, str(exc).encode("utf-8")
             )
         )
@@ -1540,6 +1624,9 @@ def check_authorization(browser, username, method, logger, notify=True):
 
 def get_username(browser, track, logger):
     """ Get the username of a user from the loaded profile page """
+
+    query = None
+
     if track == "profile":
         query = "return window._sharedData.entry_data. \
                     ProfilePage[0].graphql.user.username"
@@ -1574,14 +1661,18 @@ def get_username(browser, track, logger):
 
 def find_user_id(browser, track, username, logger):
     """  Find the user ID from the loaded page """
+
+    query = None
+    meta_XP = None
+
+    logger.info(
+        "Attempting to find user ID: Track: {}, Username {}".format(track, username)
+    )
     if track in ["dialog", "profile"]:
         query = "return window.__additionalData[Object.keys(window.__additionalData)[0]].data.graphql.user.id"
 
     elif track == "post":
-        query = (
-            "return window._sharedData.entry_data.PostPage["
-            "0].graphql.shortcode_media.owner.id"
-        )
+        query = "return window._sharedData.entry_data.ProfilePage[0].graphql.user.id"
         meta_XP = read_xpath(find_user_id.__name__, "meta_XP")
 
     failure_message = "Failed to get the user ID of '{}' from {} page!".format(
@@ -1597,9 +1688,7 @@ def find_user_id(browser, track, username, logger):
             update_activity(browser, state=None)
 
             user_id = browser.execute_script(
-                "return window._sharedData."
-                "entry_data.ProfilePage[0]."
-                "graphql.user.id"
+                "return window._sharedData.entry_data.ProfilePage[0].graphql.user.id"
             )
 
         except WebDriverException:
@@ -1628,8 +1717,8 @@ def find_user_id(browser, track, username, logger):
 
 @contextmanager
 def new_tab(browser):
-    """ USE once a host tab must remain untouched and yet needs extra data-
-    get from guest tab """
+    """USE once a host tab must remain untouched and yet needs extra data-
+    get from guest tab"""
     try:
         # add a guest tab
         browser.execute_script("window.open()")
@@ -1665,6 +1754,9 @@ def explicit_wait(browser, track, ec_params, logger, timeout=35, notify=True):
         ec_params = [ec_params]
 
     # find condition according to the tracks
+    condition = None
+    ec_name = None
+
     if track == "VOEL":
         elem_address, find_method = ec_params
         ec_name = "visibility of element located"
@@ -1736,8 +1828,8 @@ def get_username_from_id(browser, user_id, logger):
 
     query_hash = "42323d64886122307be10013ad2dcc44"  # earlier-
     # "472f257a40c653c64c666ce877d59d2b"
-    graphql_query_URL = (
-        "https://www.instagram.com/graphql/query/?query_hash" "={}".format(query_hash)
+    graphql_query_URL = "https://www.instagram.com/graphql/query/?query_hash={}".format(
+        query_hash
     )
     variables = {"id": str(user_id), "first": 1}
     post_url = "{}&variables={}".format(graphql_query_URL, str(json.dumps(variables)))
@@ -1825,7 +1917,7 @@ def is_page_available(browser, logger):
 
             elif "Content Unavailable" in page_title:
                 logger.warning(
-                    "The page isn't available!\t~the user may have blocked " "you..."
+                    "The page isn't available!\t~the user may have blocked you..."
                 )
 
             return False
@@ -1907,6 +1999,7 @@ def click_visibly(browser, element):
         )
         # update server calls
         update_activity(browser, state=None)
+        sleep(randint(1, 5))
 
         click_element(browser, element)
 
@@ -2117,22 +2210,33 @@ def is_follow_me(browser, person=None):
     return getUserData("graphql.user.follows_viewer", browser)
 
 
-def get_users_from_dialog(old_data, dialog):
+def get_users_from_dialog(old_data, dialog, logger):
     """
     Prepared to work specially with the dynamic data load in the 'Likes'
     dialog box
     """
 
-    user_blocks = dialog.find_elements_by_tag_name("a")
-    loaded_users = [
-        extract_text_from_element(u)
-        for u in user_blocks
-        if extract_text_from_element(u)
-    ]
-    new_data = old_data + loaded_users
-    new_data = remove_duplicates(new_data, True, None)
+    try:
+        user_blocks = dialog.find_elements_by_tag_name("a")
+        loaded_users = [
+            extract_text_from_element(u)
+            for u in user_blocks
+            if extract_text_from_element(u)
+        ]
+        new_data = old_data + loaded_users
+        new_data = remove_duplicates(new_data, True, None)
 
-    return new_data
+        return new_data
+
+    except (NoSuchElementException, StaleElementReferenceException) as exc:
+        # Catch stale elemets if any
+        logger.error(
+            "Error occured while retrieving data.\n\t{}".format(
+                str(exc).encode("utf-8")
+            )
+        )
+
+        return old_data
 
 
 def progress_tracker(current_value, highest_value, initial_time, logger):
@@ -2175,9 +2279,9 @@ def progress_tracker(current_value, highest_value, initial_time, logger):
         )
 
         total_message = (
-            "\r  {}/{} {}  {}%    "
-            "|> Elapsed: {}    "
-            "|> ETA: {}      ".format(
+            "\r  {0}/{1} {2}  {3}% "
+            "|> Elapsed: {4:20} "
+            "|> ETA: {5:20} ".format(
                 current_value,
                 highest_value,
                 progress_container,
@@ -2196,7 +2300,9 @@ def progress_tracker(current_value, highest_value, initial_time, logger):
             logger = Settings.logger
 
         logger.info(
-            "Error occurred with Progress Tracker:\n{}".format(str(exc).encode("utf-8"))
+            "Error occurred with Progress Tracker:\n\t{}".format(
+                str(exc).encode("utf-8")
+            )
         )
 
 
@@ -2369,7 +2475,7 @@ def get_bounding_box(
 
 def take_rotative_screenshot(browser, logfolder):
     """
-        Make a sequence of screenshots, based on hour:min:secs
+    Make a sequence of screenshots, based on hour:min:secs
     """
     global next_screenshot
 
@@ -2386,18 +2492,48 @@ def take_rotative_screenshot(browser, logfolder):
     next_screenshot += 1
 
 
-def get_query_hash(browser, logger):
-    """ Load Instagram JS file and find query hash code """
+def get_query_hash(browser, logger, edge_followed_by):
+    """
+    Load Instagram JS file and find query hash code
+
+    :param browser: webdriver instance
+    :param logger: the logger instance
+    :param edge_followed_by: query hash flag, edge_followed_by or edge_follow
+    :return: query hash
+    """
     link = "https://www.instagram.com/static/bundles/es6/Consumer.js/1f67555edbd3.js"
     web_address_navigator(browser, link)
     page_source = browser.page_source
+    # There are two query hash, one for followers and following, ie:
+    # t="c76146de99bb02f6415203be841dd25a",n="d04b0a864b4b54837c0d870b0e77e076"
+    if edge_followed_by:
+        pattern_hash = '[a-z0-9]{32}(?=",n=")'  # Used to query: edge_followed_by
+    else:
+        pattern_hash = '[a-z0-9]{32}(?=",u=1)'  # Used to query: edge_follow
     # locate pattern value from JS file
     # sequence of 32 words and/or numbers just before ,n=" value
-    hash = re.findall('[a-z0-9]{32}(?=",n=")', page_source)
+    hash = re.findall(pattern_hash, page_source)
     if hash:
         return hash[0]
     else:
-        logger.warn("Query Hash not found")
+        logger.warning("Query Hash not found")
+
+
+def file_handling(file):
+    """ Extracts text file's elements """
+    elements = []
+    try:
+        with open(file, "r") as f:
+            # extract file's lines in list
+            for line in f.readlines():
+                if line != "\n":
+                    # remove leading whitespaces, newline and tab characters
+                    element = line.lstrip().strip("\n")
+                    elements.append(element)
+    except FileNotFoundError:
+        return ["FileNotFoundError"]
+
+    return elements
 
 
 class CustomizedArgumentParser(ArgumentParser):
